@@ -14,9 +14,12 @@ import android.content.pm.PackageInfo;
 import android.content.res.AssetManager;
 import android.database.Cursor;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.provider.OpenableColumns;
+import android.view.Display;
 import android.view.HapticFeedbackConstants;
+import android.view.WindowManager;
 import android.widget.Toast;
 
 import org.libsdl.app.SDLActivity;
@@ -469,6 +472,38 @@ public class FurbActivity extends SDLActivity {
         });
     }
 
+    // A screen mode whose refresh rate is a whole multiple of the game's
+    // (millihertz): on a phone running at 90 Hz, 60 Hz (or 120) shows every
+    // frame for the same time.  The current mode if it fits, else the slowest
+    // that does (less battery); none fits: the system's choice.
+    public void preferRefresh(final String fps) {
+        if (Build.VERSION.SDK_INT < 23) return;
+        runOnUiThread(() -> {
+            double game;
+            try {
+                game = Integer.parseInt(fps) / 1000.0;
+            } catch (NumberFormatException e) {
+                return;
+            }
+            Display display = getWindowManager().getDefaultDisplay();
+            Display.Mode cur = display.getMode(), best = null;
+            for (Display.Mode m : display.getSupportedModes()) {
+                if (m.getPhysicalWidth() != cur.getPhysicalWidth() || m.getPhysicalHeight() != cur.getPhysicalHeight()) continue;
+                double n = m.getRefreshRate() / game;
+                if (Math.round(n) < 1 || Math.abs(n / Math.round(n) - 1) > 0.02) continue;
+                if (m.getModeId() == cur.getModeId()) { best = m; break; }
+                if (best == null || m.getRefreshRate() < best.getRefreshRate()) best = m;
+            }
+            WindowManager.LayoutParams lp = getWindow().getAttributes();
+            int want = best != null ? best.getModeId() : 0;
+            if (lp.preferredDisplayModeId != want) {
+                lp.preferredDisplayModeId = want;
+                getWindow().setAttributes(lp);
+                android.util.Log.i("furb", "screen mode " + (best != null ? best.getRefreshRate() + " Hz" : "(the system's)") + " for " + game + " fps");
+            }
+        });
+    }
+
     public void buzz(String unused) {
         runOnUiThread(() -> {
             if (mSurface != null) mSurface.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
@@ -629,8 +664,9 @@ public class FurbActivity extends SDLActivity {
 
     private void settingsMenu() {
         String[] names = {"Square pixels (instead of a TV's 8:7)", "Smooth the picture", "On-screen controls",
-                          "Vibrate on button presses", "Sound", "Show frames per second"};
-        String[] keys = {"aspect", "smooth", "controls", "haptics", "sound", "fps"};
+                          "Vibrate on button presses", "Sound", "Swap the 25% and 50% duty cycles (as some clone consoles do)",
+                          "Show frames per second"};
+        String[] keys = {"aspect", "smooth", "controls", "haptics", "sound", "swapduty", "fps"};
         boolean[] on = new boolean[keys.length];
         for (int i = 0; i < keys.length; i++) on[i] = num(keys[i]) != 0;
         show(dialog("Settings")

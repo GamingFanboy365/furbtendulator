@@ -2,8 +2,9 @@
 // Linux, used to test it.  A touch screen front end on SDL 2.
 //
 // The emulator runs the way furb_cli runs it: one thread, a frame at a time,
-// on the headless host (compat/host_cli.cpp).  This file adds the picture,
-// the sound, on-screen touch controls, gamepads and keyboards.  The menus are
+// on the headless host (compat/host_cli.cpp), here paced by the screen's
+// refresh (pacing.h).  This file adds the picture, the sound, on-screen
+// touch controls, gamepads and keyboards.  The menus are
 // the Android activity's (FurbActivity.java); it sends the choices here as
 // text commands (run_command below).  furb_touch reads the same commands
 // from stdin and prints what the menu would show, for testing.
@@ -25,6 +26,7 @@
 #include "Movie.h"
 #include "furb_host.h"
 #include "font.h"
+#include "pacing.h"
 #include <locale.h>
 #include <sys/stat.h>
 #include <deque>
@@ -260,6 +262,15 @@ void grab_picture(void) {
 }
 
 bool loaded(void) { return NES::ROMLoaded && PPU::PPU[0]; }
+double game_fps(void) { return NES::CurRegion == Settings::REGION_NTSC ? 39375000.0 / 655171 : 26601712.0 / 531960; }
+// Ask for a screen mode whose refresh is a whole multiple of the game's
+// (60 Hz rather than 90 on such phones), so that every frame is shown for
+// the same time (FurbActivity.preferRefresh).
+void prefer_refresh(void) {
+#ifdef __ANDROID__
+	call_activity("preferRefresh", std::to_string(std::lround(game_fps() * 1000)));
+#endif
+}
 bool is_nsf(void) { return loaded() && RI.ROMType == ROM_NSF; }
 std::string nsf_field(int id) {
 	HWND d = FurbHost::modeless(NSF_DLG);
@@ -295,6 +306,7 @@ bool open_rom(const std::string &path) {
 	scope.clear();
 	if (is_nsf()) nsf_select(nsf_song);		// (Furbtendulator waits for Play)
 	else osd(rom_name);
+	prefer_refresh();
 	return true;
 }
 
@@ -344,6 +356,7 @@ std::string menu_state(void) {
 		s += ";states=" + used;
 	}
 	for (int i = 0; i < P_COUNT; i++) s += std::string(";") + pref_keys[i] + "=" + std::to_string(pref(i));
+	s += ";swapduty=" + std::to_string(Settings::SwapDutyCycles ? 1 : 0);
 	return s;
 }
 
@@ -355,7 +368,51 @@ void keep_scope(void) {
 bool paused = false;		// the menu is open
 bool quit = false;
 bool fast_forward = false;
+
+// ================================================================ pacing, sound
+// A frame per refresh of the screen (pacing.h), and the sound stretched by a
+// fraction of a percent to keep up with it.
 SDL_AudioDeviceID audio_dev = 0;
+int audio_block = 1024;		// samples the device takes at a time
+Pacer pacer;
+AudioRate audio_rate;
+Resampler resampler;
+std::vector<int16_t> sound_out;
+long paced = 0, uneven = 0;	// refreshes with a game running, and those not showing one new frame when they should
+int pacing_hz = 0;		// (for the pacing command)
+bool pacing_vsync = false;
+
+void restart_sound(void) {
+	audio_rate.reset();
+	resampler.reset();
+	if (audio_dev) SDL_ClearQueuedAudio(audio_dev);
+}
+// this refresh's frames' sound (pending_audio), dt seconds after the last
+void queue_sound(double dt) {
+	size_t made = pending_audio.size() / 2;
+	if (!made) return;
+	double frame = SAMPLING_RATE / 60.0, target = audio_block + 3 * frame;
+	double queued = SDL_GetQueuedAudioSize(audio_dev) / 2.0;
+	if (queued > 2 * target + frame) {	// far too much waiting (it can't happen, but in case)
+		restart_sound();
+		queued = 0;
+	}
+	if (queued == 0) {	// starting, or the sound ran out: a cushion of silence first
+		std::vector<int16_t> quiet((size_t)(target - frame));
+		SDL_QueueAudio(audio_dev, quiet.data(), (Uint32)quiet.size() * 2);
+		queued = (double)quiet.size();
+	}
+	double k = audio_rate.ratio((double)made, dt, queued, target, SAMPLING_RATE);
+	sound_out.clear();
+	resampler.run((const int16_t *)pending_audio.data(), made, k, sound_out);
+	if (!sound_out.empty()) SDL_QueueAudio(audio_dev, sound_out.data(), (Uint32)sound_out.size() * 2);
+}
+// the screen's refresh rate as the system reports it, 0 if it doesn't
+int screen_hz(SDL_Window *win) {
+	SDL_DisplayMode m;
+	int d = SDL_GetWindowDisplayIndex(win);
+	return d >= 0 && SDL_GetCurrentDisplayMode(d, &m) == 0 ? m.refresh_rate : 0;
+}
 
 void show_menu(void) {
 #ifdef __ANDROID__
@@ -378,11 +435,19 @@ void run_command(const std::string &line) {
 	else if (cmd == "resume") paused = false;
 	else if (cmd == "menu") show_menu();
 	else if (cmd == "state") { printf("state: %s\n", menu_state().c_str()); fflush(stdout); }
+	else if (cmd == "pacing") {
+		printf("pacing: refreshes=%ld uneven=%ld hz=%.2f reported=%d vsync=%d lock=%d sound=%d\n", paced, uneven, pacer.refresh_hz(), pacing_hz, pacing_vsync, pacer.locked(), audio_dev ? 1 : 0);
+		fflush(stdout);
+	}
 	else if (cmd == "quit") quit = true;
 	else if (cmd == "pref") {
 		std::string key = arg.substr(0, arg.find(' '));
 		int v = atoi(arg.c_str() + key.size());
 		for (int i = 0; i < P_COUNT; i++) if (key == pref_keys[i]) prefs[i].value = v;
+		// Furbtendulator's own "swapped duty cycles" (its Sound menu): the 25%
+		// and 50% square waves exchanged, as on some clone consoles.  The APU
+		// applies it when a game next sets a duty, which most do every note.
+		if (key == "swapduty") Settings::SwapDutyCycles = v != 0;
 		save_settings();
 	} else if (!loaded()) {
 		return;
@@ -410,6 +475,7 @@ void run_command(const std::string &line) {
 	else if (cmd == "region") {
 		NES::SetRegion(n == 1 ? Settings::REGION_PAL : n == 2 ? Settings::REGION_DENDY : Settings::REGION_NTSC);
 		osd(n == 1 ? "PAL" : n == 2 ? "DENDY" : "NTSC");
+		prefer_refresh();
 	} else if (cmd == "nsf-song") nsf_select(n);
 	else if (cmd == "nsf-next") nsf_select(nsf_song + 1);
 	else if (cmd == "nsf-prev") nsf_select(nsf_song - 1);
@@ -837,7 +903,7 @@ void draw(void) {
 		draw_text(osd_text, x, y, px, {255, 255, 255, 255});
 	}
 	if (pref(P_FPS) && loaded()) {
-		std::string f = std::to_string(shown_fps) + " FPS";
+		std::string f = std::to_string(shown_fps) + " FPS  " + std::to_string((int)std::lround(pacer.refresh_hz())) + " HZ";
 		draw_text(f, L.game.x + L.game.w - text_width(f, px) - px * 3, L.game.y + L.game.h - px * 10, px, {255, 255, 0, 255});
 	}
 	SDL_RenderPresent(ren);
@@ -913,7 +979,7 @@ int main(int argc, char **argv) {
 			       "  commands on stdin: open PATH | save N | load N | reset | hardreset | region 0|1|2\n"
 			       "  | fds-insert | fds-eject | fds-next | fds-prev | coin1 | coin2\n"
 			       "  | nsf-song N | nsf-next | nsf-prev | nsf-play | nsf-stop\n"
-			       "  | pref NAME VALUE | menu | state | pause | resume | close | quit\n");
+			       "  | pref NAME VALUE | menu | state | pacing | pause | resume | close | quit\n");
 			return 0;
 		} else first_rom = a;
 	}
@@ -976,8 +1042,11 @@ int main(int argc, char **argv) {
 	want.channels = 1;
 	want.samples = 1024;
 	audio_dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);	// SDL converts to the device's format
-	if (audio_dev) SDL_PauseAudioDevice(audio_dev, 0);
-	else SDL_Log("furb: no sound: %s", SDL_GetError());
+	if (audio_dev) {
+		audio_block = have.samples;
+		SDL_PauseAudioDevice(audio_dev, 0);
+	} else
+		SDL_Log("furb: no sound: %s", SDL_GetError());
 
 	SDL_RendererInfo info;
 	bool vsync = SDL_GetRendererInfo(ren, &info) == 0 && (info.flags & SDL_RENDERER_PRESENTVSYNC);
@@ -987,8 +1056,12 @@ int main(int argc, char **argv) {
 	while (next_command(c)) run_command(c);
 	if (!loaded() && !paused) show_menu();	// (paused: the activity is opening a game already)
 
-	Uint64 freq = SDL_GetPerformanceFrequency(), clock_start = SDL_GetPerformanceCounter();
-	double clock_frames = 0;
+	Uint64 freq = SDL_GetPerformanceFrequency(), last_present = SDL_GetPerformanceCounter(), next_tick = last_present;
+	// (furb_touch on a display without vsync paces itself by a 60 Hz clock)
+	auto refresh = [&](void) { return vsync ? screen_hz(win) : 60; };
+	int hz = refresh();
+	pacer.reset();
+	restart_sound();
 	bool menu_combo_held = false, ff_key = false;
 	while (!quit) {
 		SDL_Event e;
@@ -1000,7 +1073,8 @@ int main(int argc, char **argv) {
 				if (audio_dev) SDL_PauseAudioDevice(audio_dev, 1);
 				break;
 			case SDL_APP_DIDENTERFOREGROUND:
-				if (audio_dev) { SDL_ClearQueuedAudio(audio_dev); SDL_PauseAudioDevice(audio_dev, 0); }
+				restart_sound();
+				if (audio_dev) SDL_PauseAudioDevice(audio_dev, 0);
 				break;
 			case SDL_APP_TERMINATING: persist(); break;
 			case SDL_FINGERDOWN: case SDL_FINGERMOTION: case SDL_FINGERUP: finger_event(e); break;
@@ -1035,6 +1109,10 @@ int main(int argc, char **argv) {
 				break;
 			case SDL_WINDOWEVENT:
 				if (e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) fingers.clear(), update_touch();
+				hz = refresh();	// (moved to another screen, or the screen's mode changed)
+				break;
+			case SDL_DISPLAYEVENT:
+				hz = refresh();
 				break;
 			}
 		}
@@ -1071,33 +1149,26 @@ int main(int argc, char **argv) {
 		for (auto &k : dik_of) if (keys[k.first]) Controllers::KeyState[k.second] = 0x80;
 		fast_forward = touch_ff || ff_key || pad_ff;
 
-		// run frames: as many as the sound needs (it is the clock), or by the
-		// time when there is no sound; several per screen refresh when fast-forwarding
+		// run frames: as many as are due by the screen's refreshes (one per
+		// refresh at 60 Hz); several per refresh when fast-forwarding
+		Uint64 now = SDL_GetPerformanceCounter();
+		double dt = (double)(now - last_present) / freq;
+		last_present = now;
 		int ran = 0;
 		if (loaded() && !paused) {
-			double fps = NES::CurRegion == Settings::REGION_NTSC ? 39375000.0 / 655171 : 26601712.0 / 531960;
-			bool sound = audio_dev && pref(P_SOUND);
-			Uint32 frame_bytes = (Uint32)(SAMPLING_RATE * 2 / fps);
+			double fps = game_fps();
 			if (fast_forward) {
 				for (; ran < 4; ran++) run_frame();
-				if (audio_dev) SDL_ClearQueuedAudio(audio_dev);
-			} else if (sound) {
-				while (SDL_GetQueuedAudioSize(audio_dev) < 4 * frame_bytes && ran < 4) {
-					run_frame();
-					ran++;
-					SDL_QueueAudio(audio_dev, pending_audio.data(), (Uint32)pending_audio.size());
-					keep_scope();
-					pending_audio.clear();
-				}
-			}
-			if (!sound && !fast_forward) {
-				double now = (double)(SDL_GetPerformanceCounter() - clock_start) / freq * fps;
-				if (now - clock_frames > 8) clock_frames = now - 1;	// fell behind (or was paused): don't race
-				while (clock_frames < now && ran < 4) { run_frame(); ran++; clock_frames++; }
+				pacer.reset();
 			} else {
-				clock_start = SDL_GetPerformanceCounter();
-				clock_frames = 0;
+				for (int due = pacer.frames(dt, fps, hz); ran < due; ran++) run_frame();
+				pacing_hz = hz;
+				pacing_vsync = vsync;
+				paced++;
+				if (pacer.locked() == 1 && ran != 1) uneven++;
 			}
+			if (audio_dev && pref(P_SOUND) && !fast_forward) queue_sound(dt);
+			else restart_sound();
 			keep_scope();
 			pending_audio.clear();
 			if (nsf_playing) nsf_frames += ran;
@@ -1106,18 +1177,23 @@ int main(int argc, char **argv) {
 				poll_titlebar();
 			}
 		} else {
-			clock_start = SDL_GetPerformanceCounter();
-			clock_frames = 0;
-			if (audio_dev) SDL_ClearQueuedAudio(audio_dev);
+			pacer.reset();
+			restart_sound();
 		}
 		fps_frames += ran;
 		if (SDL_TICKS_PASSED(SDL_GetTicks(), fps_since + 1000)) {
 			shown_fps = fps_frames;
 			fps_frames = 0;
 			fps_since = SDL_GetTicks();
+			hz = refresh();
 		}
 		draw();
-		if (!vsync) SDL_Delay(2);	// (furb_touch on a display without vsync)
+		if (!vsync) {	// the 60 Hz clock, as if it were the screen's refresh
+			Uint64 tick = freq / 60, t = SDL_GetPerformanceCounter();
+			next_tick = next_tick + tick < t ? t + tick : next_tick + tick;
+			while ((t = SDL_GetPerformanceCounter()) < next_tick)
+				SDL_Delay((Uint32)((next_tick - t) * 1000 / freq > 2 ? (next_tick - t) * 1000 / freq - 1 : 0));
+		}
 	}
 
 	persist();
