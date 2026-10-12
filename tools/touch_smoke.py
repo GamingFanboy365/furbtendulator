@@ -57,7 +57,8 @@ open(nsf, 'wb').write(b'NESM\x1a\x01\x03\x01' + struct.pack('<HHH', 0x8000, 0x80
                       b'Smoke Test'.ljust(32, b'\0') + b'touch_smoke'.ljust(32, b'\0') + b'2026'.ljust(32, b'\0') +
                       struct.pack('<H', 16639) + bytes(8) + struct.pack('<H', 19997) + bytes(6) + nsf_code)
 
-env = dict(os.environ, DISPLAY=':78', SDL_AUDIODRIVER='dummy')
+# (Xvfb's "vsync" is a timer of about 62 Hz: the front end's own 60 Hz clock instead)
+env = dict(os.environ, DISPLAY=':78', SDL_AUDIODRIVER='dummy', SDL_RENDER_VSYNC='0')
 xvfb = subprocess.Popen(['Xvfb', ':78', '-screen', '0', '1280x1024x24'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 time.sleep(1)
 wm = subprocess.Popen(['openbox'], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -116,6 +117,9 @@ def run(w, h, tag):
 	try:
 		m = expect('menu:')
 		check('[%s] with no game, asks for the menu at startup' % tag, m is not None and 'loaded=0' in m, m or '')
+		if tag == 'portrait':
+			check('[%s] swapped duty cycles kept from last time' % tag, m is not None and 'swapduty=1' in m)
+			send('pref swapduty 0')
 		win = None
 		for _ in range(50):
 			win = xdo('search', '--onlyvisible', '--classname', 'furb_touch')
@@ -138,6 +142,14 @@ def run(w, h, tag):
 		send('state')
 		st = expect('state:')
 		check('[%s] the game is loaded' % tag, st is not None and 'loaded=1' in st and 'name=pad game' in st, st or '')
+		# a new frame every refresh (here a 60 Hz clock: Xvfb has no vsync)
+		def pacing():
+			send('pacing')
+			p = expect('pacing:')
+			return dict(kv.split('=') for kv in p.split()[1:]) if p else None
+		p0 = pacing(); time.sleep(3); p1 = pacing()
+		ok = p0 and p1 and int(p1['refreshes']) - int(p0['refreshes']) > 150 and int(p1['uneven']) - int(p0['uneven']) <= 2 and p1['lock'] == '1'
+		check('[%s] one frame per refresh' % tag, ok, '%s -> %s' % (p0, p1))
 		before = pixel(gx, gy)
 		shot(tag + '-1-running')
 		check('[%s] draws the game (black background)' % tag, before is not None and max(before) < 40, str(before))
@@ -170,6 +182,10 @@ def run(w, h, tag):
 		send('pref smooth 1'); send('pref aspect 1'); send('state')
 		st = expect('state:')
 		check('[%s] settings change' % tag, st is not None and 'smooth=1' in st and 'aspect=1' in st, st or '')
+		if tag == 'landscape':
+			send('pref swapduty 1'); send('state')
+			st = expect('state:')
+			check('[%s] swapped duty cycles on' % tag, st is not None and 'swapduty=1' in st, st or '')
 		send('pref smooth 0'); send('pref aspect 0')
 		send('quit')
 		try:

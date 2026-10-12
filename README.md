@@ -267,8 +267,21 @@ is in use and come back at the next touch.
 
 The settings are square or TV-shaped (8:7) pixels, a smoothed or sharp
 picture, the on-screen controls on or off and their opacity, vibration on
-button presses, sound, and a frames-per-second counter.  The emulation is
-paced by the sound, as on Windows.  Furbtendulator is an accurate, and so
+button presses, sound, swapped duty cycles (Furbtendulator's Sound menu
+option: the 25% and 50% square waves exchanged, as on some clone consoles'
+sound chips), and a counter of frames per second and the screen's refresh
+rate.
+
+The emulation is paced by the screen (`android/native/pacing.h`): on a 60 Hz
+screen every refresh shows the next frame, on a 120 Hz one every other
+refresh, and on a phone running at 90 Hz the app asks for its 60 Hz (or
+120 Hz) mode where it has one.  The game then runs at the screen's speed
+(0.16% slower than an NTSC NES on a 60.00 Hz screen) and the sound is
+stretched by a fraction of a percent to match.  Pacing by the sound, as the
+first versions did, skipped and doubled frames many times a second, because
+phones take sound in blocks of 1024 samples or more: `tools/pacing_sim.cpp`
+simulates both against different screens and sound devices.
+Furbtendulator is an accurate, and so
 demanding, emulator: on this port's test machine one x86_64 core ran VT03
 and VT369 test ROMs at about 230-240 frames per second and plain NES ones at
 about 350, so recent phones have room to spare, but a slow budget phone may
@@ -488,7 +501,7 @@ directory.  `build.py` never modifies the source tree; it copies it to
 | `exports.list` | the executables' one exported symbol |
 | `build.py`, `prep_src.py` | build driver and source-copy fixups |
 | `selftest.py` | `furb_cli` feature self-test |
-| `tools/` | `compare_builds.py`, `fuzzrom.py`, `gui_smoke.py`, `touch_smoke.py`, `build_bin32.sh`, `build_android.sh` |
+| `tools/` | `compare_builds.py`, `fuzzrom.py`, `gui_smoke.py`, `touch_smoke.py`, `pacing_sim.cpp`, `build_bin32.sh`, `build_android.sh` |
 | `LICENSE` | GNU GPL v2, Furbtendulator's license |
 
 ## License and credits
