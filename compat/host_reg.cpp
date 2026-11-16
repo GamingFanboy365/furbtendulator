@@ -9,6 +9,8 @@
 #include <deque>
 #include <map>
 #include <set>
+#include <string>
+#include <vector>
 
 namespace FurbHost {
 bool verbose = false, quiet = false;

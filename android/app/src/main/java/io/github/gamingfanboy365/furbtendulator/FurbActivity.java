@@ -525,7 +525,9 @@ public class FurbActivity extends SDLActivity {
     }
 
     private AlertDialog.Builder dialog(String title) {
-        return new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert).setTitle(title);
+        // (Material came with Android 5.0; Android 4.4 has Holo)
+        int theme = Build.VERSION.SDK_INT >= 21 ? android.R.style.Theme_Material_Dialog_Alert : AlertDialog.THEME_HOLO_DARK;
+        return new AlertDialog.Builder(this, theme).setTitle(title);
     }
 
     private AlertDialog show(AlertDialog.Builder b) {

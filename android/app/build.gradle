@@ -13,7 +13,10 @@ android {
 
     defaultConfig {
         applicationId 'io.github.gamingfanboy365.furbtendulator'
-        minSdk 21            // Android 5.0
+        minSdk 19            // Android 4.4
+        // (more than one dex file on Android 4.4: Commons Compress and the
+        // java.nio.file it needs come to over 64K methods)
+        multiDexEnabled true
         targetSdk 35
         versionCode 1
         versionName '1.0'
@@ -72,4 +75,6 @@ dependencies {
     implementation 'org.apache.commons:commons-compress:1.27.1'
     implementation 'org.tukaani:xz:1.10'
     coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs_nio:2.1.5'
+    // loads the second dex file on Android 4.4 (newer ones do it themselves)
+    implementation 'androidx.multidex:multidex:2.0.1'
 }
