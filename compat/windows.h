@@ -443,6 +443,10 @@ inline int furb_wcscat_s(wchar_t *d, size_t n, const wchar_t *s) { wcsncat(d, s,
 #define _tsplitpath_s(...) ((void)0)
 #define _wsplitpath_s(...) ((void)0)
 
+// n bytes of zeroed memory, reserved but not charged against the system's
+// memory until used (compat.cpp; prep_src.py puts NES::PRG_ROM there)
+void *furb_reserve(size_t n);
+
 // Wide-path file I/O (paths are converted to UTF-8).
 std::string furb_narrow(const wchar_t *w);
 std::wstring furb_widen(const char *s);

@@ -198,7 +198,7 @@ continuation replay frame-identically on a real game.
 
 ## Furbtendulator for Android
 
-`android/` is Furbtendulator as an Android app, for Android 5.0 or newer on
+`android/` is Furbtendulator as an Android app, for Android 4.4 or newer on
 64-bit and 32-bit ARM and x86 (phones, tablets, Android TV, Chromebooks).  It
 runs the same emulator objects as `furb_cli`, frame by frame on one thread,
 so its emulation is `furb_cli`'s: what a game does on the phone it does in
@@ -211,8 +211,11 @@ AI-assisted debugging, use `furb` and `furb_cli` on a PC.
 `bin-android/Furbtendulator.apk` is a ready-made build for all four ABIs.
 Install it by opening it on the device (Android asks to allow installs from
 that app, the browser or file manager, the first time) or with
-`adb install bin-android/Furbtendulator.apk`.  It has run on an emulated
-phone so far, not yet on a real one (see *What was tested*).
+`adb install bin-android/Furbtendulator.apk`.  It has run on emulated
+phones and tablets so far, not yet on a real one (see *What was tested*).
+A version from before Android 4.4 support has to be uninstalled first (it
+was signed with another key; see *Building the APK*), which deletes its
+saves.
 
 ### Using it
 
@@ -222,7 +225,9 @@ picks a file through Android's file picker.  `.nes`, `.unf`, `.fds`, `.nsf`
 and the other formats Furbtendulator opens work, and so do compressed files:
 ZIP, 7z and gzip.  An archive holding one game opens it; one holding several
 lists them to choose from, with a search box when there are many (any words
-typed, anywhere in the name).  RAR archives are not supported.  A picked game
+typed, anywhere in the name).  RAR archives are not supported, and 7z
+archives (and ZIPs whose file names are not UTF-8) need Android 7.0 or
+newer; ZIP and gzip work on every version.  A picked game
 is copied into the app's own storage, so it is listed under *Recent games*
 afterwards and its battery saves and save states stay with it.  File
 managers can also open a game or an archive in the app directly (*Open
@@ -293,13 +298,16 @@ not reach full speed.
 tools/build_android.sh [--accept-sdk-license] [WORKDIR]     # -> bin-android/Furbtendulator.apk
 ```
 
-It needs the Android SDK with an NDK (r27 or newer; `ANDROID_HOME`, and
-`ANDROID_NDK_HOME` or an NDK in the SDK's `ndk/` folder), git, cmake, ninja,
-python3, a JDK 17 or newer, and network access to dl.google.com,
-maven.google.com and github.com.  Without an SDK, `--accept-sdk-license`
-downloads Google's command-line tools into WORKDIR (default `build-android/`)
-and installs the platform, build tools and NDK there; that means accepting
-the Android SDK license, so pass it only if you do.  The script fetches
+It needs the Android SDK (`ANDROID_HOME`) with two NDKs, in its `ndk/`
+folder or given as `ANDROID_NDK_HOME` and `FURB_NDK32`: r27 for the 64-bit
+libraries, built for Android 5.0 (every 64-bit device has 5.0 or newer), and
+r25c for the 32-bit ones, built for Android 4.4, which newer NDKs no longer
+build for.  It also needs git, cmake, ninja, python3, a JDK 17 or newer, and
+network access to dl.google.com, maven.google.com and github.com.  Without
+an SDK, `--accept-sdk-license` downloads Google's command-line tools into
+WORKDIR (default `build-android/`) and installs the platform, build tools
+and both NDKs there; that means accepting the Android SDK license, so pass
+it only if you do.  The script fetches
 SDL 2.32.10 with git, builds it and `build.py --android ABI` (the emulator,
 the front end and the mapper packs with the NDK's clang) for each ABI, and
 has Gradle package them with the activity, SDL's Java half and the data files
@@ -314,7 +322,9 @@ The APK is signed with `FURB_KEYSTORE` (with `FURB_KEYSTORE_PASSWORD`,
 installs an update over an earlier version only when both are signed with the
 same key, and uninstalling instead deletes the app's saves.  The included
 APK is signed with such a key of its own: an APK built with another key
-installs only after it is uninstalled.
+installs only after it is uninstalled.  That key changed with the Android
+4.4 version (the earlier one was lost with the machine it was made on), so
+a version from before it must be uninstalled once before this one installs.
 
 ### Inside
 
@@ -348,6 +358,23 @@ MENU asks for the menu, that save states, reset and the settings work, that
 it exits cleanly with its settings saved, and that the NSF player plays a
 generated NSF, changes songs with NEXT and stops.
 
+Android 4.4 needs a few things newer versions do not.  Its C library writes
+only the first character of a wide string in `printf`-style formatting (the
+emulator builds its paths and messages that way), so the Android 4.4 builds
+format wide strings in `compat.cpp` instead.  Its dynamic linker looks an
+app's libraries up by name only in the system's folders, so the mapper packs
+are loaded by full path, from the folder the emulator's own library was
+loaded from (read from `/proc/self/maps`).  The Java side needs multidex
+(Commons Compress and the `java.nio.file` it uses come to more than one dex
+file) and Holo dialogs (Material came with Android 5.0).
+
+`build.py --android ABI` also links `furb_cli` for the device (not part of
+the app).  `tools/adb_furb_cli.py --setup BUILD/android` copies it and the
+mapper packs to a device or emulator, after which `tools/adb_furb_cli.py`
+runs it through adb as if it were a local `furb_cli`, so that
+`tools/compare_builds.py build/furb_cli tools/adb_furb_cli.py ROMS...`
+compares the emulation inside Android with a PC build.
+
 ### What was tested
 
 The NSF player and the archives were tested the same way: three NSF files
@@ -369,9 +396,29 @@ compared across the CPUs Android runs on, built with clang 18 as the NDK r27
 builds it: arm64 and 32-bit ARMv7 (under qemu) and 32-bit x86 give exactly
 the output of the x86_64 build on all 311 comparison ROMs and these games
 (below).  Untested: a real phone or tablet (real touch screens, speed,
-sound latency), the ARM builds inside Android (the emulator ran the x86_64
-one), gamepads and keyboards on Android, Android TV, Chromebooks, and newer
+sound latency), the ARM builds inside a running Android system (see below),
+gamepads and keyboards on Android, Android TV, Chromebooks, and newer
 Android versions.
+
+On Android 4.4.2 (Google's emulator, an x86 system image) the APK starts,
+finds its mapper packs, opens games through *Open with* and from ZIPs (a
+three-game ZIP lists them; a one-game ZIP opens directly) and plays them
+(Star Ally on VT03, Lucky Lawn Mower and Fire Fighter on VT369 in its hi-res
+mode, Sky Fighter on VT09, Lonely Island), plays an NSF, saves and loads
+states, opens the menus (in Android 4.4's Holo style), the settings and the
+system file picker, and shows the frame counter.  It also runs on a 512 MB
+tablet image (600x1024, 160 dpi).  The 32-bit libraries for Android 4.4 come
+from NDK r25c's clang 14 rather than r27's clang 18, so their emulation was
+compared again: `furb_cli` built with it gives exactly the PC build's output
+on the 30 PocketVT test games, 6 fuzz ROMs and an NSF, for x86 inside the
+Android 4.4 emulator (`tools/adb_furb_cli.py`) and for ARMv7 under qemu-arm
+with Android 4.4's own ARM system libraries, which also run it through the
+305 ROMs of the test-ROM collection without a difference.  The APK's ARMv7
+libraries load with Android 4.4's ARM dynamic linker the same way (under
+qemu-arm); the whole ARM Android 4.4 system could not be run, as Google's
+emulator no longer runs 32-bit ARM system images.  On Android 7.0 the APK
+still runs as before (Material menus, VT369 games), and its x86_64
+`furb_cli` matches the PC build on 10 of these games and fuzz ROMs.
 
 ## Determinism and 32/64-bit and ARM builds
 
@@ -394,6 +441,13 @@ one 64-bit load; `prep_src.py` gives those accesses an unaligned type
 (`furb_ua32`).  Two upstream reads of uninitialised memory
 (the first audio sample; CPU/PPU members the constructors never set) are
 closed: the sound buffer and every `new` allocation start zeroed.
+`NES::PRG_ROM`, 256 MB to hold the largest OneBus ROMs, is a static array on
+Windows; `prep_src.py` makes it memory reserved with `MAP_NORESERVE`
+(`compat.cpp`, `furb_reserve`) and still zeroed, so that only the pages a
+game uses count against the system's memory where Linux checks it when a
+program or library is loaded (stock Android does not), and so that
+`furb_cli` loads at all on Android 4.4, whose 32-bit kernels place
+position-independent programs too high for a 256 MB array after them.
 
 `tools/compare_builds.py A/furb_cli B/furb_cli ROMS...` runs two builds over
 a set of ROMs and reports any difference in video hashes, WAV, RAM or
@@ -401,8 +455,11 @@ registers.  `tools/fuzzrom.py DIR` generates OneBus test ROMs for VT02, VT03,
 VT09, VT32, VT369 and UM6578 that hammer the VT PPU/CPU registers, palettes,
 4bpp modes and sprites.  These builds agree on all 311 ROMs of the public NES
 test-ROM collection (christopherpow/nes-test-roms) plus these: GCC on i386
-and x86_64 (natively) and on arm64 (under qemu), and clang 18 on x86_64,
-i386, arm64 and 32-bit ARMv7 (the last two under qemu).
+and x86_64 (natively) and on arm64 (under qemu), clang 18 on x86_64,
+i386, arm64 and 32-bit ARMv7 (the last two under qemu), and NDK r25c's
+clang 14, which builds the Android 4.4 libraries, on 32-bit ARMv7 (under
+qemu, with Android 4.4's own libraries; its i386 build was compared inside
+the Android 4.4 emulator on these games only).
 
 ## What is not tested
 
@@ -491,7 +548,7 @@ directory.  `build.py` never modifies the source tree; it copies it to
 | Path | Contents |
 |------|----------|
 | `bin/` | the prebuilt programs (`furb`, `furb_cli`), mapper packs and data files (x86_64, built on Ubuntu 24.04, GCC 13) |
-| `bin-android/` | `Furbtendulator.apk`, the Android app for arm64-v8a, armeabi-v7a, x86 and x86_64 (Android 5.0+, built with NDK r27 and SDL 2.32.10) |
+| `bin-android/` | `Furbtendulator.apk`, the Android app for arm64-v8a, armeabi-v7a, x86 and x86_64 (Android 4.4+; built with SDL 2.32.10 and NDK r27 for 64-bit, r25c for 32-bit) |
 | `bin32/` | standalone 32-bit `furb` and `furb_cli` with their mapper packs and data files, for older systems (i386, glibc 2.29+, built against Ubuntu 20.04's GCC 9, glibc, GTK 3 and SDL 2) |
 | `Furbtendulator-src/` | Furbtendulator's complete source as released (minus Visual Studio's IntelliSense cache), plus `bin-data/` (the release's `.cfg` files and empty `BIOS/`, `samples/` folders) |
 | `furb_cli.cpp` | the command-line front end (replaces `WinMain`) |
@@ -501,7 +558,7 @@ directory.  `build.py` never modifies the source tree; it copies it to
 | `exports.list` | the executables' one exported symbol |
 | `build.py`, `prep_src.py` | build driver and source-copy fixups |
 | `selftest.py` | `furb_cli` feature self-test |
-| `tools/` | `compare_builds.py`, `fuzzrom.py`, `gui_smoke.py`, `touch_smoke.py`, `pacing_sim.cpp`, `build_bin32.sh`, `build_android.sh` |
+| `tools/` | `compare_builds.py`, `adb_furb_cli.py`, `fuzzrom.py`, `gui_smoke.py`, `touch_smoke.py`, `pacing_sim.cpp`, `build_bin32.sh`, `build_android.sh` |
 | `LICENSE` | GNU GPL v2, Furbtendulator's license |
 
 ## License and credits

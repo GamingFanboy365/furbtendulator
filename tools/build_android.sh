@@ -1,14 +1,17 @@
 #!/bin/bash
 # build_android.sh -- build Furbtendulator for Android: bin-android/Furbtendulator.apk
 # for phones, tablets, TVs and Chromebooks (64- and 32-bit ARM and x86,
-# Android 5.0 or newer).
+# Android 4.4 or newer).
 #
 #     tools/build_android.sh [--accept-sdk-license] [WORKDIR]   (default WORKDIR: ./build-android)
 #
-# Needs the Android SDK with an NDK (r27 or newer): ANDROID_HOME (or
-# ANDROID_SDK_ROOT) and ANDROID_NDK_HOME, or an SDK whose ndk/ folder has one.
+# Needs the Android SDK with two NDKs, in its ndk/ folder or given as
+# ANDROID_NDK_HOME and FURB_NDK32: r27 builds the 64-bit libraries (64-bit
+# devices all have Android 5.0 or newer), and r25c the 32-bit ones, for
+# Android 4.4 (API 19), which newer NDKs no longer build for.  ANDROID_HOME
+# (or ANDROID_SDK_ROOT) names the SDK.
 # Without an SDK, --accept-sdk-license downloads Google's command-line tools
-# into WORKDIR and installs the platform, build tools and NDK there, which
+# into WORKDIR and installs the platform, build tools and both NDKs there, which
 # means accepting the Android SDK license (https://developer.android.com/studio/terms)
 # -- only pass it if you do.  Also needs git, cmake, ninja, python3, a JDK 17
 # or newer, and network access to dl.google.com, maven.google.com and github.com.
@@ -25,7 +28,8 @@ if [ "${1:-}" = --accept-sdk-license ]; then ACCEPT=1; shift; fi
 WORK=$(realpath -m "${1:-$HERE/build-android}")
 ABIS=${FURB_ABIS:-arm64-v8a armeabi-v7a x86 x86_64}
 SDL_TAG=release-2.32.10
-NDK_VERSION=27.2.12479018
+NDK_VERSION=27.2.12479018	# 64-bit ABIs, API 21
+NDK32_VERSION=25.2.9519653	# 32-bit ABIs, API 19 (r25c: the last NDK for API 19)
 PLATFORM=35
 BUILD_TOOLS=35.0.0
 JOBS=$(nproc 2>/dev/null || echo 4)
@@ -49,18 +53,20 @@ fi
 SDKMANAGER=$SDK/cmdline-tools/latest/bin/sdkmanager
 if [ -x "$SDKMANAGER" ] && [ $ACCEPT = 1 ]; then
 	yes | "$SDKMANAGER" --sdk_root="$SDK" --licenses > /dev/null || true
-	"$SDKMANAGER" --sdk_root="$SDK" "platforms;android-$PLATFORM" "build-tools;$BUILD_TOOLS" "ndk;$NDK_VERSION" "platform-tools"
+	"$SDKMANAGER" --sdk_root="$SDK" "platforms;android-$PLATFORM" "build-tools;$BUILD_TOOLS" "ndk;$NDK_VERSION" \
+		"ndk;$NDK32_VERSION" "platform-tools"
 fi
-NDK=${ANDROID_NDK_HOME:-}
-if [ -z "$NDK" ]; then
-	NDK=$(ls -d "$SDK"/ndk/* 2>/dev/null | sort -V | tail -1 || true)
-fi
-if [ -z "$NDK" ] || [ ! -d "$NDK/toolchains/llvm" ]; then
-	echo "build_android.sh: no NDK (set ANDROID_NDK_HOME, or install one with sdkmanager \"ndk;$NDK_VERSION\")" >&2
-	exit 1
-fi
+NDK64=${ANDROID_NDK_HOME:-$SDK/ndk/$NDK_VERSION}
+NDK32=${FURB_NDK32:-$SDK/ndk/$NDK32_VERSION}
+for n in "$NDK64:$NDK_VERSION:ANDROID_NDK_HOME" "$NDK32:$NDK32_VERSION:FURB_NDK32"; do
+	IFS=: read -r dir version var <<< "$n"
+	if [ ! -d "$dir/toolchains/llvm" ]; then
+		echo "build_android.sh: no NDK at $dir (set $var, or install it with sdkmanager \"ndk;$version\")" >&2
+		exit 1
+	fi
+done
 echo "SDK $SDK"
-echo "NDK $NDK"
+echo "NDK $NDK64 (64-bit), $NDK32 (32-bit)"
 
 # ---- SDL 2
 if [ ! -d "$WORK/SDL2/.git" ]; then
@@ -71,16 +77,23 @@ OUT=$HERE/android/native-out
 rm -rf "$OUT" && mkdir -p "$OUT/jniLibs" "$OUT/assets/furb"
 for abi in $ABIS; do
 	echo "==== $abi"
+	case $abi in
+	arm64-v8a|x86_64) NDK=$NDK64; API=21 ;;
+	*) NDK=$NDK32; API=19 ;;
+	esac
 	cmake -S "$WORK/SDL2" -B "$WORK/sdl-$abi" -G Ninja -DCMAKE_BUILD_TYPE=Release \
 		-DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" -DANDROID_ABI="$abi" \
-		-DANDROID_PLATFORM=android-21 -DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON \
+		-DANDROID_PLATFORM=android-$API -DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON \
 		-DCMAKE_SHARED_LINKER_FLAGS="-Wl,-z,max-page-size=16384" \
 		-DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TEST=OFF > "$WORK/sdl-$abi.log"
 	cmake --build "$WORK/sdl-$abi" -j "$JOBS" >> "$WORK/sdl-$abi.log"
-	python3 "$HERE/build.py" --android "$abi" --ndk "$NDK" --sdl "$WORK/SDL2" --sdl-lib "$WORK/sdl-$abi" \
+	python3 "$HERE/build.py" --android "$abi" --ndk "$NDK" --api $API --sdl "$WORK/SDL2" --sdl-lib "$WORK/sdl-$abi" \
 		--build "$WORK/build-$abi" -j "$JOBS"
 	mkdir -p "$OUT/jniLibs/$abi"
-	cp "$WORK/sdl-$abi/libSDL2.so" "$WORK/build-$abi"/android/*.so "$OUT/jniLibs/$abi/"
+	cp "$WORK/build-$abi"/android/*.so "$OUT/jniLibs/$abi/"
+	# (without the debug information the NDK's CMake toolchain builds SDL with)
+	"$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" --strip-debug \
+		-o "$OUT/jniLibs/$abi/libSDL2.so" "$WORK/sdl-$abi/libSDL2.so"
 	DATA=$WORK/build-$abi
 done
 # Furbtendulator's data files (the same for every ABI)

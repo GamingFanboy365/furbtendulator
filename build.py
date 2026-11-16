@@ -18,9 +18,12 @@ GUI (GTK 3 / SDL 2), and furb_cli, the headless program for scripted runs.
 --android ABI --ndk DIR --sdl DIR --sdl-lib DIR
          the Android libraries for one ABI (arm64-v8a, armeabi-v7a, x86,
          x86_64) with the NDK's clang: BUILD/android/libmain.so (emulator +
-         front end) and libfurb_{iNES,FDS,NSF,VS}.so (the mapper packs).
+         front end) and libfurb_{iNES,FDS,NSF,VS}.so (the mapper packs),
+         and furb_cli for the device (tools/adb_furb_cli.py runs it).
          --sdl is SDL 2's source (its include/), --sdl-lib the folder with
-         libSDL2.so built for that ABI.  tools/build_android.sh does it all.
+         libSDL2.so built for that ABI; --api the lowest Android version
+         (default 21; tools/build_android.sh builds the 32-bit ABIs for 19,
+         Android 4.4, with NDK r25c).  tools/build_android.sh does it all.
 
 Produces BUILD/furb, BUILD/furb_cli and BUILD/Mappers/{iNES,FDS,NSF,VS}.so (the mapper packs,
 loaded at run time exactly like Furbtendulator loads Mappers\*.dll).
@@ -52,7 +55,7 @@ ap.add_argument('--cflags', default='', help='more flags for every compile and l
 ap.add_argument('--touch', action='store_true', help='also build furb_touch, the Android front end on desktop SDL 2')
 ap.add_argument('--android', metavar='ABI', choices=['arm64-v8a', 'armeabi-v7a', 'x86', 'x86_64'])
 ap.add_argument('--ndk', default=os.environ.get('ANDROID_NDK_HOME') or os.environ.get('ANDROID_NDK_ROOT'))
-ap.add_argument('--api', type=int, default=21, help='lowest Android API level (default 21, Android 5.0)')
+ap.add_argument('--api', type=int, default=21, help='lowest Android API level (default 21, Android 5.0; 19, Android 4.4, needs NDK r25c)')
 ap.add_argument('--sdl', help='SDL 2 source tree (for --android)')
 ap.add_argument('--sdl-lib', help='folder with libSDL2.so for the ABI (for --android)')
 args = ap.parse_args()
@@ -283,9 +286,10 @@ if args.android:
     # 16 KiB pages: Android 15 devices may use them.
     AOUT = os.path.join(B, 'android')
     os.makedirs(AOUT, exist_ok=True)
-    # (no-dependent-libraries: lld would follow the sources' #pragma comment(lib, "winmm.lib"))
+    # (no-dependent-libraries: lld would follow the sources' #pragma comment(lib, "winmm.lib");
+    # strip-debug: NDK r25c's C++ runtime brings its debug information along)
     ALINK = [args.cxx] + ARCH + ['-shared', '-static-libstdc++', '-Wl,-z,max-page-size=16384', '-Wl,--gc-sections',
-                                 '-Wl,--no-dependent-libraries']
+                                 '-Wl,--no-dependent-libraries', '-Wl,--strip-debug']
     for name, _, _ in PACKS:
         link('libfurb_%s.so' % name, ALINK + ['-Wl,--exclude-libs,ALL', '-fvisibility=hidden', '-Wl,-z,defs',
              '-o', os.path.join(AOUT, 'libfurb_%s.so' % name)] + objs_of(name) + [libm_obj, '-ldl'])
@@ -294,6 +298,12 @@ if args.android:
     link('libmain.so', ALINK + ['-Wl,-z,defs', '-Wl,--version-script=' + os.path.join(TOUCH, 'libmain.map'),
          '-o', os.path.join(AOUT, 'libmain.so')] + emu + [obj_for_host('host_cli.o'), os.path.join(OBJ, 'touch', 'main.o'), libm_obj,
          '-L' + os.path.abspath(args.sdl_lib), '-lSDL2', '-llog', '-landroid', '-ldl', '-lm'])
+    # furb_cli for the device, to run with adb (not part of the app): the
+    # emulation as the app runs it, for comparing with a PC build
+    # (tools/adb_furb_cli.py).  It finds the packs next to itself.
+    link('furb_cli (Android)', [args.cxx] + ARCH + ['-pie', '-static-libstdc++', '-Wl,--gc-sections', '-Wl,--no-dependent-libraries',
+         '-Wl,--dynamic-list=' + os.path.join(HERE, 'exports.list'), '-o', os.path.join(AOUT, 'furb_cli')] +
+         objs_of('main') + [libm_obj, '-llog', '-ldl'])
 else:
     # -z defs: the pack must be self-contained, like a DLL (fail at build, not dlopen)
     for name, _, _ in PACKS:

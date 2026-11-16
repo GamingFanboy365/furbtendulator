@@ -72,6 +72,14 @@ FIXUPS = [
     # chunk IDs: a signed shift into the sign bit is not a constant expression
     ('src-main/src/NES.cpp', r'\(\(\(a\) <<  8\) & 0x00FF0000\) \| \\\n\t\t\(\(\(a\) << 24\)',
      '(((unsigned)(a) <<  8) & 0x00FF0000) | \\\\\\n\\t\\t(((unsigned)(a) << 24)'),
+    # PRG_ROM, 256 MB of static array: reserved instead, so that only the
+    # pages in use count against the device's memory (compat.cpp,
+    # furb_reserve); a reference to the array keeps every use as it was
+    ('src-main/src/NES.h', r'extern unsigned char PRG_ROM\[MAX_PRGROM_SIZE\]\[0x1000\];',
+     'extern unsigned char (&PRG_ROM)[MAX_PRGROM_SIZE][0x1000];'),
+    ('src-main/src/NES.cpp', r'\nunsigned char PRG_ROM\[MAX_PRGROM_SIZE\]\[0x1000\];',
+     '\nunsigned char (&PRG_ROM)[MAX_PRGROM_SIZE][0x1000] = *(unsigned char (*)[MAX_PRGROM_SIZE][0x1000])'
+     'furb_reserve(sizeof(unsigned char[MAX_PRGROM_SIZE][0x1000]));'),
     # not MSVC-only, but nondeterministic: buffer[0] of the first audio chunk
     # is never written, so the first sample was whatever the heap held
     ('src-main/src/Sound.cpp', r'buffer = new short\[buflen\];', 'buffer = new short[buflen]();'),

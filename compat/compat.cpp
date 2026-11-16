@@ -10,6 +10,9 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <dlfcn.h>
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
 #include <fnmatch.h>
 #include <locale.h>
 #include <sys/time.h>
@@ -200,9 +203,92 @@ std::wstring furb_fixfmt(const wchar_t *fmt) {
 	return out;
 }
 
+#if defined(__ANDROID__) && __ANDROID_API__ < 21
+// Android 4.4's printf writes only the first character of a wide string
+// (%ls) or character (%lc), and so does the vswprintf the NDK supplies for
+// it, which formats through it.  So format here, one conversion at a time
+// through the narrow vsnprintf, wide strings and characters as UTF-8.
+static std::wstring format_one(const char *spec, ...) {
+	va_list ap, again;
+	va_start(ap, spec);
+	va_copy(again, ap);
+	int n = vsnprintf(NULL, 0, spec, ap);
+	std::string s(n > 0 ? n : 0, '\0');
+	if (n > 0) vsnprintf(&s[0], n + 1, spec, again);
+	va_end(again);
+	va_end(ap);
+	return furb_widen(s.c_str());
+}
+static int format_wide(wchar_t *buf, size_t n, const wchar_t *fmt, va_list ap) {
+	std::wstring out;
+	for (const wchar_t *p = fmt; *p; p++) {
+		if (*p != L'%') { out += *p; continue; }
+		if (p[1] == L'%') { out += L'%'; p++; continue; }
+		// %[flags][width][.precision][length]conversion; '*' taken from the arguments
+		std::string spec = "%", len;
+		const wchar_t *q = p + 1;
+		while (*q && wcschr(L"-+ #0", *q)) spec += (char)*q++;
+		if (*q == L'*') { spec += std::to_string(va_arg(ap, int)); q++; }
+		else while (*q >= L'0' && *q <= L'9') spec += (char)*q++;
+		if (*q == L'.') {
+			spec += '.'; q++;
+			if (*q == L'*') { spec += std::to_string(va_arg(ap, int)); q++; }
+			else while (*q >= L'0' && *q <= L'9') spec += (char)*q++;
+		}
+		while (*q && wcschr(L"hlLjzt", *q)) len += (char)*q++;
+		wchar_t conv = *q;
+		if (!conv) break;
+		p = q;
+		bool wide = len == "l";
+		switch (conv) {
+		case L's':
+			if (wide) {
+				const wchar_t *w = va_arg(ap, const wchar_t *);
+				out += format_one((spec + "s").c_str(), w ? furb_narrow(w).c_str() : "(null)");
+			} else {
+				const char *c = va_arg(ap, const char *);
+				out += format_one((spec + "s").c_str(), c ? c : "(null)");
+			}
+			break;
+		case L'c':
+			if (wide) out += format_one((spec + "s").c_str(), furb_narrow(std::wstring(1, (wchar_t)va_arg(ap, wint_t)).c_str()).c_str());
+			else out += format_one((spec + "c").c_str(), va_arg(ap, int));
+			break;
+		case L'd': case L'i': case L'o': case L'u': case L'x': case L'X':
+			if (len == "ll" || len == "j") out += format_one((spec + len + (char)conv).c_str(), va_arg(ap, long long));
+			else if (len == "l" || len == "z" || len == "t") out += format_one((spec + len + (char)conv).c_str(), va_arg(ap, long));
+			else out += format_one((spec + len + (char)conv).c_str(), va_arg(ap, int));
+			break;
+		case L'e': case L'E': case L'f': case L'F': case L'g': case L'G': case L'a': case L'A':
+			if (len == "L") out += format_one((spec + "L" + (char)conv).c_str(), va_arg(ap, long double));
+			else out += format_one((spec + (char)conv).c_str(), va_arg(ap, double));
+			break;
+		case L'p':
+			out += format_one((spec + "p").c_str(), va_arg(ap, void *));
+			break;
+		case L'n':
+			*va_arg(ap, int *) = (int)out.size();
+			break;
+		default:	// not a conversion: as written
+			out += furb_widen((spec + len).c_str());
+			out += conv;
+		}
+	}
+	if (!n) return -1;
+	size_t k = out.size() < n ? out.size() : n - 1;
+	wmemcpy(buf, out.data(), k);
+	buf[k] = 0;
+	return out.size() < n ? (int)out.size() : -1;
+}
+#endif
+
 int furb_vswprintf(wchar_t *buf, size_t n, const wchar_t *fmt, va_list ap) {
 	std::wstring f = furb_fixfmt(fmt);
+#if defined(__ANDROID__) && __ANDROID_API__ < 21
+	int r = format_wide(buf, n, f.c_str(), ap);
+#else
 	int r = vswprintf(buf, n, f.c_str(), ap);
+#endif
 	if (r < 0 && n) buf[n - 1] = 0;
 	return r;
 }
@@ -220,7 +306,15 @@ int furb_fwprintf(FILE *f, const wchar_t *fmt, ...) {
 }
 int furb_swscanf(const wchar_t *s, const wchar_t *fmt, ...) {
 	std::wstring f = furb_fixfmt(fmt);
-	va_list ap; va_start(ap, fmt); int r = vswscanf(s, f.c_str(), ap); va_end(ap); return r;
+	va_list ap; va_start(ap, fmt);
+#if defined(__ANDROID__) && __ANDROID_API__ < 21
+	// (no vswscanf before Android 5.0: scan the UTF-8 text instead -- the
+	// same for numbers; nothing in Furbtendulator scans strings with it)
+	int r = vsscanf(furb_narrow(s).c_str(), furb_narrow(f.c_str()).c_str(), ap);
+#else
+	int r = vswscanf(s, f.c_str(), ap);
+#endif
+	va_end(ap); return r;
 }
 
 // ---------------------------------------------------------------- operator new
@@ -243,6 +337,23 @@ void operator delete(void *p) noexcept { free(p); }
 void operator delete[](void *p) noexcept { free(p); }
 void operator delete(void *p, size_t) noexcept { free(p); }
 void operator delete[](void *p, size_t) noexcept { free(p); }
+
+// ---------------------------------------------------------------- furb_reserve
+// NES::PRG_ROM has room for the largest OneBus ROMs, 256 MB, as a static
+// array on Windows.  As a static array here, Linux would count all of it
+// against the free memory when the program (or the Android app's library)
+// is loaded, and refuse to load on a phone or tablet with little memory
+// left; reserved with MAP_NORESERVE, only the pages a game uses count.
+#include <sys/mman.h>
+void *furb_reserve(size_t n) {
+	void *p = mmap(NULL, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+	if (p == MAP_FAILED) p = calloc(n, 1);
+	if (!p) {
+		fprintf(stderr, "furb: cannot reserve %zu bytes\n", n);
+		abort();
+	}
+	return p;
+}
 
 // ---------------------------------------------------------------- FindFirstFile
 struct FindState { std::vector<std::string> names; size_t next; };
@@ -278,16 +389,48 @@ BOOL FindClose(HANDLE h) { delete (FindState *)h; return TRUE; }
 #ifndef FURB_PACK
 extern "C" void *furb_host_lookup(const char *name);	// host_reg.cpp
 #endif
+#ifdef __ANDROID__
+// The folder of the library this code is in (ending in '/'), from the
+// process's memory map: dladdr gives only the file name on Android 4.4.
+static std::string own_folder(void) {
+	uintptr_t self = (uintptr_t)&own_folder;
+	FILE *f = fopen("/proc/self/maps", "r");
+	if (!f) return "";
+	char line[1024];
+	std::string dir;
+	while (dir.empty() && fgets(line, sizeof line, f)) {
+		unsigned long long lo, hi;
+		int at = 0;
+		if (sscanf(line, "%llx-%llx %*s %*s %*s %*s %n", &lo, &hi, &at) < 2 || !at) continue;
+		if (self < lo || self >= hi || line[at] != '/') continue;
+		std::string p(line + at);
+		p.erase(p.find_last_not_of("\r\n") + 1);
+		dir = p.substr(0, p.find_last_of('/') + 1);
+	}
+	fclose(f);
+	return dir;
+}
+#endif
 HMODULE LoadLibrary(const wchar_t *name) {
 	std::string path = posix_path(name);
 	void *h = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
 #ifdef __ANDROID__
 	// Android installs the packs with the app's other native libraries, as
-	// libfurb_<pack>.so; the Mappers folder only names them
-	if (!h) h = dlopen(("libfurb_" + path.substr(path.find_last_of('/') + 1)).c_str(), RTLD_NOW | RTLD_LOCAL);
+	// libfurb_<pack>.so; the Mappers folder only names them.  By full path,
+	// from this library's own folder: Android 6 and older look a bare name
+	// up only in the system's folders.
+	if (!h) {
+		std::string pack = "libfurb_" + path.substr(path.find_last_of('/') + 1), dir = own_folder();
+		if (!dir.empty()) h = dlopen((dir + pack).c_str(), RTLD_NOW | RTLD_LOCAL);
+		if (!h) h = dlopen(pack.c_str(), RTLD_NOW | RTLD_LOCAL);
+	}
 #endif
 	if (!h) {
-		fprintf(stderr, "furb: dlopen %s: %s\n", path.c_str(), dlerror());
+		const char *err = dlerror();
+		fprintf(stderr, "furb: dlopen %s: %s\n", path.c_str(), err);
+#if defined(__ANDROID__) && !defined(FURB_PACK)
+		__android_log_print(ANDROID_LOG_WARN, "furb", "dlopen %s: %s", path.c_str(), err ? err : "?");
+#endif
 		return NULL;
 	}
 #ifndef FURB_PACK
